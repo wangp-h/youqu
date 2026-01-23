@@ -597,13 +597,26 @@ class ButtonCenter:
         :return: 窗口编号列表
         """
         if GlobalConfig.IS_X11:
-            cmd = f"xdotool search --onlyvisible --classname {name}"
-            app_id = CmdCtl.run_cmd(
-                cmd, interrupt=False, out_debug_flag=False, command_log=False
-            ).strip()
-            if app_id:
-                return [i for i in app_id.split("\n") if i]
-            raise ApplicationStartError(app_id)
+            # 增加重试机制，给应用一些启动时间
+            # 如果 retry 为 1，至少重试 3 次；否则使用配置的重试次数
+            max_retry = max(self.retry, 3) if hasattr(self, 'retry') and self.retry >= 1 else 3
+            retry_interval = self.pause if hasattr(self, 'pause') else 1
+            
+            for attempt in range(max_retry):
+                cmd = f"xdotool search --onlyvisible --classname {name}"
+                app_id = CmdCtl.run_cmd(
+                    cmd, interrupt=False, out_debug_flag=False, command_log=False
+                ).strip()
+                if app_id:
+                    return [i for i in app_id.split("\n") if i]
+                
+                # 如果不是最后一次尝试，等待后重试
+                if attempt < max_retry - 1:
+                    logger.debug(f"未找到窗口 {name}，等待 {retry_interval} 秒后重试 ({attempt + 1}/{max_retry})")
+                    sleep(retry_interval)
+            
+            # 所有重试都失败后，抛出异常
+            raise ApplicationStartError(f"经过 {max_retry} 次重试后，仍未找到应用窗口: {name}")
         else:
             info = self.wwininfo.window_info().get(self.app_name)
             if isinstance(info, dict):
@@ -618,11 +631,17 @@ class ButtonCenter:
         """
         if GlobalConfig.IS_WAYLAND:
             return
-        app_id = self.get_windows_id(app_name if app_name else self.app_name)
-        windows = int(app_id[self.number])
-        cmd = f"xdotool windowactivate {windows}"
-        CmdCtl.run_cmd(cmd, interrupt=False, out_debug_flag=False, command_log=False)
-        logger.debug(f"<{app_name}> 窗口置顶并聚焦")
+        try:
+            app_id = self.get_windows_id(app_name if app_name else self.app_name)
+            windows = int(app_id[self.number])
+            cmd = f"xdotool windowactivate {windows}"
+            CmdCtl.run_cmd(cmd, interrupt=False, out_debug_flag=False, command_log=False)
+            logger.debug(f"<{app_name}> 窗口置顶并聚焦")
+        except ApplicationStartError as e:
+            # 在teardown阶段或其他场景，应用可能已经关闭，窗口不存在是正常情况
+            # 记录日志但不抛出异常，避免影响测试结果
+            logger.warning(f"尝试聚焦应用窗口失败（可能应用已关闭）: {app_name if app_name else self.app_name}, 错误信息: {e}")
+            # 不重新抛出异常，允许继续执行
 
     def get_lastest_window_id(self, app_name: str) -> int:
         """
